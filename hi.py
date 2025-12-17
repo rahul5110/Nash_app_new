@@ -149,7 +149,8 @@ def main():
         "Select Analysis Mode:",
         ["📊 Observed vs Estimated (Fixed n, k)",
          "🔍 Parameter Estimation (Multiple Methods)",
-         "📈 Representative Unit Hydrograph"]
+         "📈 Representative Unit Hydrograph",
+         "🔮 Runoff Prediction (Rainfall Only)"] # NEW MODE
     )
     
     st.sidebar.markdown("---")
@@ -277,181 +278,119 @@ def main():
                     st.pyplot(fig)
                     plt.close()
     
-    # ==================== MODE 2: PARAMETER ESTIMATION ====================
+   # ==================== MODE 2: PARAMETER ESTIMATION ====================
     elif analysis_mode == "🔍 Parameter Estimation (Multiple Methods)":
-        st.markdown('<div class="sub-header">Parameter Estimation Analysis</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Multi-Method Parameter Estimation</div>', unsafe_allow_html=True)
         
-        methods = st.multiselect(
-            "Select Optimization Methods:",
-            ["Moments", "L-BFGS-B", "Differential Evolution", "Genetic Algorithm"],
-            default=["Moments", "L-BFGS-B"]
+        st.sidebar.markdown("### Optimization Settings")
+        primary_method = st.sidebar.radio(
+            "Select Primary View Focus:",
+            ["Moments", "L-BFGS-B", "Differential Evolution", "Genetic Algorithm"]
         )
         
-        if st.button("🚀 Run Estimation", type="primary"):
-            with st.spinner("Estimating parameters..."):
+        if st.button("🚀 Run All Models & Compare", type="primary"):
+            with st.spinner("Calculating and plotting all events..."):
                 results_list = []
-                
+                all_event_plots = [] 
+
                 for event_id in unique_events:
                     event_data = df[df['Event_ID'] == event_id].copy()
                     Q_obs = event_data['Q_obs_event'].values
                     rainfall_excess = event_data['rain_mm_interval'].values
                     time_steps = event_data['Time_step'].values
-                    
                     dt_hr = time_steps[1] - time_steps[0] if len(time_steps) > 1 else dt_hours
+                    time_axis = time_steps - time_steps[0]
                     
                     event_results = {'Event_ID': event_id}
+                    model_outputs = {} 
+
+                    # 1. Moments Method
+                    t_q = (np.arange(len(Q_obs)) + 0.5) * dt_hr
+                    t_r = (np.arange(len(rainfall_excess)) + 0.5) * dt_hr
+                    w_q = Q_obs * (3600.0 * dt_hr)
+                    w_r = rainfall_excess.copy()
                     
-                    # Moments method
-                    if "Moments" in methods:
-                        t_q = (np.arange(len(Q_obs)) + 0.5) * dt_hr
-                        t_r = (np.arange(len(rainfall_excess)) + 0.5) * dt_hr
-                        w_q = Q_obs * (3600.0 * dt_hr)
-                        w_r = rainfall_excess.copy()
-                        
-                        if np.sum(w_q) > 0 and np.sum(w_r) > 0:
-                            m1_q, var_q = moments_discrete(t_q, w_q)
-                            m1_r, var_r = moments_discrete(t_r, w_r)
-                            m1_u = m1_q - m1_r
-                            var_u = var_q - var_r
-                            
-                            if var_u > 1e-9:
-                                n_moments = (m1_u ** 2) / var_u
-                                k_moments = m1_u / n_moments
-                                
-                                Q_est = calculate_nash_unit_hydrograph(
-                                    rainfall_excess, area_ha, dt_hr, n_moments, k_moments, len(Q_obs)
-                                )
-                                rmse, nse = calculate_goodness_of_fit(Q_obs, Q_est)
-                                
-                                event_results['Moments_n'] = n_moments
-                                event_results['Moments_k'] = k_moments
-                                event_results['Moments_RMSE'] = rmse
-                                event_results['Moments_NSE'] = nse
-                    
-                    # Optimization methods
-                    if any(m in methods for m in ["L-BFGS-B", "Differential Evolution", "Genetic Algorithm"]):
-                        if 'n_moments' in locals() and np.isfinite(n_moments):
-                            initial_guess = [n_moments, k_moments]
-                        else:
-                            initial_guess = [2.0, 2.0]
-                        
-                        bounds = [(0.01, 20), (0.01, 50)]
-                        
-                        if "L-BFGS-B" in methods:
-                            result = minimize(
-                                objective_rmse, initial_guess,
-                                args=(Q_obs, rainfall_excess, area_ha, dt_hr),
-                                method='L-BFGS-B', bounds=bounds
-                            )
-                            n_opt, k_opt = result.x
-                            Q_est = calculate_nash_unit_hydrograph(
-                                rainfall_excess, area_ha, dt_hr, n_opt, k_opt, len(Q_obs)
-                            )
-                            rmse, nse = calculate_goodness_of_fit(Q_obs, Q_est)
-                            
-                            event_results['LBFGSB_n'] = n_opt
-                            event_results['LBFGSB_k'] = k_opt
-                            event_results['LBFGSB_RMSE'] = rmse
-                            event_results['LBFGSB_NSE'] = nse
-                        
-                        if "Differential Evolution" in methods:
-                            result = differential_evolution(
-                                objective_rmse, bounds,
-                                args=(Q_obs, rainfall_excess, area_ha, dt_hr),
-                                seed=42, maxiter=100
-                            )
-                            n_opt, k_opt = result.x
-                            Q_est = calculate_nash_unit_hydrograph(
-                                rainfall_excess, area_ha, dt_hr, n_opt, k_opt, len(Q_obs)
-                            )
-                            rmse, nse = calculate_goodness_of_fit(Q_obs, Q_est)
-                            
-                            event_results['DE_n'] = n_opt
-                            event_results['DE_k'] = k_opt
-                            event_results['DE_RMSE'] = rmse
-                            event_results['DE_NSE'] = nse
-                        
-                        if "Genetic Algorithm" in methods:
-                            result = dual_annealing(
-                                objective_rmse, bounds,
-                                args=(Q_obs, rainfall_excess, area_ha, dt_hr),
-                                seed=42, maxiter=100
-                            )
-                            n_opt, k_opt = result.x
-                            Q_est = calculate_nash_unit_hydrograph(
-                                rainfall_excess, area_ha, dt_hr, n_opt, k_opt, len(Q_obs)
-                            )
-                            rmse, nse = calculate_goodness_of_fit(Q_obs, Q_est)
-                            
-                            event_results['GA_n'] = n_opt
-                            event_results['GA_k'] = k_opt
-                            event_results['GA_RMSE'] = rmse
-                            event_results['GA_NSE'] = nse
-                    
+                    n_mom, k_mom = 2.0, 2.0
+                    if np.sum(w_q) > 0 and np.sum(w_r) > 0:
+                        m1_q, var_q = moments_discrete(t_q, w_q)
+                        m1_r, var_r = moments_discrete(t_r, w_r)
+                        m1_u, var_u = m1_q - m1_r, var_q - var_r
+                        if var_u > 1e-9:
+                            n_mom = (m1_u ** 2) / var_u
+                            k_mom = m1_u / n_mom
+                            Q_mom = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_mom, k_mom, len(Q_obs))
+                            _, nse_mom = calculate_goodness_of_fit(Q_obs, Q_mom)
+                            event_results.update({'Moments_n': n_mom, 'Moments_k': k_mom, 'Moments_NSE': nse_mom})
+                            model_outputs['Moments'] = {'q': Q_mom, 'n': n_mom, 'k': k_mom}
+
+                    bounds = [(0.01, 20), (0.01, 50)]
+                    initial_guess = [n_mom, k_mom]
+
+                    # 2. L-BFGS-B
+                    res_lb = minimize(objective_rmse, initial_guess, args=(Q_obs, rainfall_excess, area_ha, dt_hr), method='L-BFGS-B', bounds=bounds)
+                    n_lb, k_lb = res_lb.x
+                    Q_lb = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_lb, k_lb, len(Q_obs))
+                    _, nse_lb = calculate_goodness_of_fit(Q_obs, Q_lb)
+                    event_results.update({'LBFGSB_n': n_lb, 'LBFGSB_k': k_lb, 'LBFGSB_NSE': nse_lb})
+                    model_outputs['L-BFGS-B'] = {'q': Q_lb, 'n': n_lb, 'k': k_lb}
+
+                    # 3. Differential Evolution
+                    res_de = differential_evolution(objective_rmse, bounds, args=(Q_obs, rainfall_excess, area_ha, dt_hr), seed=42)
+                    n_de, k_de = res_de.x
+                    Q_de = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_de, k_de, len(Q_obs))
+                    _, nse_de = calculate_goodness_of_fit(Q_obs, Q_de)
+                    event_results.update({'DE_n': n_de, 'DE_k': k_de, 'DE_NSE': nse_de})
+                    model_outputs['Diff. Evolution'] = {'q': Q_de, 'n': n_de, 'k': k_de}
+
+                    # 4. Genetic Algorithm
+                    res_ga = dual_annealing(objective_rmse, bounds, args=(Q_obs, rainfall_excess, area_ha, dt_hr), seed=42)
+                    n_ga, k_ga = res_ga.x
+                    Q_ga = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_ga, k_ga, len(Q_obs))
+                    _, nse_ga = calculate_goodness_of_fit(Q_obs, Q_ga)
+                    event_results.update({'GA_n': n_ga, 'GA_k': k_ga, 'GA_NSE': nse_ga})
+                    model_outputs['Gen. Algorithm'] = {'q': Q_ga, 'n': n_ga, 'k': k_ga}
+
                     results_list.append(event_results)
-                
-                results_df = pd.DataFrame(results_list)
-                
-                st.markdown("### 📋 Estimated Parameters")
-                st.dataframe(results_df, use_container_width=True)
-                
-                # Comparison plot
-                st.markdown("### 📊 Method Comparison")
-                
-                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-                
-                for method_prefix in ['Moments', 'LBFGSB', 'DE', 'GA']:
-                    nse_col = f'{method_prefix}_NSE'
-                    if nse_col in results_df.columns:
-                        axes[0, 0].plot(results_df['Event_ID'], results_df[nse_col], 
-                                       marker='o', label=method_prefix)
-                
-                axes[0, 0].set_xlabel('Event ID')
-                axes[0, 0].set_ylabel('NSE')
-                axes[0, 0].set_title('NSE Comparison')
-                axes[0, 0].legend()
-                axes[0, 0].grid(True, alpha=0.3)
-                axes[0, 0].axhline(y=0.5, color='r', linestyle='--', alpha=0.5)
-                
-                for method_prefix in ['Moments', 'LBFGSB', 'DE', 'GA']:
-                    rmse_col = f'{method_prefix}_RMSE'
-                    if rmse_col in results_df.columns:
-                        axes[0, 1].plot(results_df['Event_ID'], results_df[rmse_col],
-                                       marker='o', label=method_prefix)
-                
-                axes[0, 1].set_xlabel('Event ID')
-                axes[0, 1].set_ylabel('RMSE')
-                axes[0, 1].set_title('RMSE Comparison')
-                axes[0, 1].legend()
-                axes[0, 1].grid(True, alpha=0.3)
-                
-                for method_prefix in ['Moments', 'LBFGSB', 'DE', 'GA']:
-                    n_col = f'{method_prefix}_n'
-                    if n_col in results_df.columns:
-                        axes[1, 0].plot(results_df['Event_ID'], results_df[n_col],
-                                       marker='o', label=method_prefix)
-                
-                axes[1, 0].set_xlabel('Event ID')
-                axes[1, 0].set_ylabel('n parameter')
-                axes[1, 0].set_title('n Parameter Comparison')
-                axes[1, 0].legend()
-                axes[1, 0].grid(True, alpha=0.3)
-                
-                for method_prefix in ['Moments', 'LBFGSB', 'DE', 'GA']:
-                    k_col = f'{method_prefix}_k'
-                    if k_col in results_df.columns:
-                        axes[1, 1].plot(results_df['Event_ID'], results_df[k_col],
-                                       marker='o', label=method_prefix)
-                
-                axes[1, 1].set_xlabel('Event ID')
-                axes[1, 1].set_ylabel('k parameter (hr)')
-                axes[1, 1].set_title('k Parameter Comparison')
-                axes[1, 1].legend()
-                axes[1, 1].grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close()
+                    all_event_plots.append({'id': event_id, 'time': time_axis, 'obs': Q_obs, 'rain': rainfall_excess, 'models': model_outputs, 'dt': dt_hr})
+
+                st.markdown("### 📋 Comparative Parameter Table")
+                st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+
+                st.markdown("---")
+                st.markdown("### 📊 Overlap-Aware Comparison Hydrographs")
+
+                for plot_data in all_event_plots:
+                    with st.expander(f"Event {plot_data['id']} Comparison", expanded=True):
+                        fig, ax1 = plt.subplots(figsize=(12, 5))
+                        ax1.plot(plot_data['time'], plot_data['obs'], 'k-', linewidth=3, label='Observed', zorder=2)
+                        
+                        # Configuration to handle overlaps: Different widths and dash styles
+                        styles = {
+                            'Moments': {'c': '#e41a1c', 'lw': 5.0, 'ls': '-', 'alpha': 0.4},
+                            'L-BFGS-B': {'c': '#377eb8', 'lw': 3.5, 'ls': '--', 'alpha': 0.7},
+                            'Diff. Evolution': {'c': '#4daf4a', 'lw': 2.0, 'ls': ':', 'alpha': 0.9},
+                            'Gen. Algorithm': {'c': '#984ea3', 'lw': 1.0, 'ls': '-.', 'alpha': 1.0}
+                        }
+
+                        for m_name, data in plot_data['models'].items():
+                            s = styles[m_name]
+                            label_str = f"{m_name} (n={data['n']:.2f}, k={data['k']:.2f})"
+                            ax1.plot(plot_data['time'], data['q'], 
+                                    color=s['c'], linewidth=s['lw'], linestyle=s['ls'], 
+                                    alpha=s['alpha'], label=label_str, zorder=3)
+                        
+                        ax1.set_xlabel('Time (hr)')
+                        ax1.set_ylabel('Discharge (m³/s)')
+                        ax1.legend(loc='upper right', fontsize='x-small', frameon=True, shadow=True)
+                        ax1.grid(True, alpha=0.2)
+
+                        ax2 = ax1.twinx()
+                        ax2.bar(plot_data['time'], plot_data['rain'], width=plot_data['dt']*0.7, alpha=0.15, color='gray')
+                        ax2.set_ylabel('Rainfall (mm)')
+                        ax2.invert_yaxis()
+                        
+                        st.pyplot(fig)
+                        plt.close()
     
     # ==================== MODE 3: REPRESENTATIVE UH ====================
     else:  # Representative Unit Hydrograph
@@ -605,6 +544,67 @@ def main():
                     file_name="representative_uh.csv",
                     mime="text/csv"
                 )
+    
+    # ==================== MODE 4: RUNOFF PREDICTION (NEW) ====================
+    if analysis_mode == "🔮 Runoff Prediction (Rainfall Only)":
+        st.markdown('<div class="sub-header">Predict Runoff from Rainfall Data</div>', unsafe_allow_html=True)
+        st.info("This mode uses your calibrated parameters to forecast runoff. No observed discharge (Q_obs) is required.")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            n_pred = st.number_input("Calibrated Nash n", value=1.735, min_value=0.1, step=0.01)
+        with col2:
+            k_pred = st.number_input("Calibrated Nash k (hours)", value=1.031, min_value=0.1, step=0.01)
+
+        if st.button("🔮 Generate Prediction", type="primary"):
+            prediction_results = []
+            
+            for event_id in unique_events:
+                event_data = df[df['Event_ID'] == event_id].copy()
+                rain = event_data['rain_mm_interval'].values
+                time_steps = event_data['Time_step'].values
+                dt_hr = time_steps[1] - time_steps[0] if len(time_steps) > 1 else dt_hours
+                time_axis = time_steps - time_steps[0]
+
+                # Generate Runoff
+                # We extend output length slightly to ensure we see the recession curve
+                output_len = len(rain) + int(10/dt_hr) 
+                Q_pred = calculate_nash_unit_hydrograph(rain, area_ha, dt_hr, n_pred, k_pred, output_len)
+                
+                # Create a time axis for the longer prediction
+                time_axis_pred = np.arange(output_len) * dt_hr
+
+                # Store result
+                res_df = pd.DataFrame({
+                    'Time_hr': time_axis_pred,
+                    'Rainfall_mm': np.pad(rain, (0, output_len - len(rain)), 'constant'),
+                    'Predicted_Runoff_m3s': Q_pred
+                })
+                
+                with st.expander(f"Prediction for Event {event_id}", expanded=True):
+                    fig, ax1 = plt.subplots(figsize=(12, 5))
+                    ax1.plot(time_axis_pred, Q_pred, 'r-', linewidth=2, label=f'Predicted (n={n_pred}, k={k_pred})')
+                    ax1.set_xlabel('Time (hr)')
+                    ax1.set_ylabel('Predicted Discharge (m³/s)', color='red')
+                    ax1.tick_params(axis='y', labelcolor='red')
+                    ax1.grid(True, alpha=0.2)
+
+                    ax2 = ax1.twinx()
+                    ax2.bar(time_axis_pred, res_df['Rainfall_mm'], width=dt_hr*0.7, alpha=0.2, color='blue', label='Rainfall Input')
+                    ax2.set_ylabel('Rainfall (mm)', color='blue')
+                    ax2.invert_yaxis()
+                    
+                    st.pyplot(fig)
+                    plt.close()
+
+                    # Individual download for this event
+                    csv = res_df.to_csv(index=False)
+                    st.download_button(
+                        label=f"📥 Download Event {event_id} Prediction",
+                        data=csv,
+                        file_name=f"prediction_event_{event_id}.csv",
+                        mime="text/csv"
+                    )
 
 if __name__ == "__main__":
     main()
