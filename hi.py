@@ -101,6 +101,18 @@ def objective_rmse(params, Q_obs, rainfall_excess_mm, area_ha, dt_hr):
     except:
         return np.inf
 
+def leave_one_out_geometric_mean(series):
+    """Calculate leave-one-out geometric mean for each value in series"""
+    gmeans = []
+    for i in range(len(series)):
+        subset = [x for j, x in enumerate(series) if j != i and x > 0]
+        if len(subset) > 0:
+            gm = np.exp(np.mean(np.log(subset)))
+        else:
+            gm = np.nan
+        gmeans.append(gm)
+    return gmeans
+
 def load_and_validate_csv(uploaded_file):
     """Load and validate CSV file"""
     try:
@@ -150,7 +162,7 @@ def main():
         ["📊 Observed vs Estimated (Fixed n, k)",
          "🔍 Parameter Estimation (Multiple Methods)",
          "📈 Representative Unit Hydrograph",
-         "🔮 Runoff Prediction (Rainfall Only)"] # NEW MODE
+         "🔮 Runoff Prediction (Rainfall Only)"]
     )
     
     st.sidebar.markdown("---")
@@ -176,8 +188,10 @@ def main():
     
     # Common parameters
     st.sidebar.markdown("### Watershed Parameters")
-    area_ha = st.sidebar.number_input("Catchment Area (ha)", value=645.0, min_value=1.0)
-    dt_hours = st.sidebar.number_input("Time Step (hours)", value=0.25, min_value=0.01)
+    area_ha = st.sidebar.number_input("Catchment Area (ha)", value=645.0, min_value=1.0, step=10.0, 
+                                       help="Enter the catchment area in hectares")
+    dt_hours = st.sidebar.number_input("Time Step (hours)", value=0.25, min_value=0.01, step=0.05,
+                                        help="Time interval between data points")
     
     unique_events = df['Event_ID'].unique()
     st.sidebar.markdown(f"**Events found:** {len(unique_events)}")
@@ -223,11 +237,9 @@ def main():
                 
                 results_df = pd.DataFrame(results_list)
                 
-                # Display results
                 st.markdown("### 📋 Results Summary")
                 st.dataframe(results_df, use_container_width=True)
                 
-                # Overall statistics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Average NSE", f"{results_df['NSE'].mean():.3f}")
@@ -238,7 +250,6 @@ def main():
                 with col4:
                     st.metric("Events with NSE>0.5", len(results_df[results_df['NSE'] > 0.5]))
                 
-                # Plots for each event
                 st.markdown("### 📊 Event Hydrographs")
                 
                 for event_id in unique_events:
@@ -278,18 +289,12 @@ def main():
                     st.pyplot(fig)
                     plt.close()
     
-   # ==================== MODE 2: PARAMETER ESTIMATION ====================
+    # ==================== MODE 2: PARAMETER ESTIMATION ====================
     elif analysis_mode == "🔍 Parameter Estimation (Multiple Methods)":
         st.markdown('<div class="sub-header">Multi-Method Parameter Estimation</div>', unsafe_allow_html=True)
         
-        st.sidebar.markdown("### Optimization Settings")
-        primary_method = st.sidebar.radio(
-            "Select Primary View Focus:",
-            ["Moments", "L-BFGS-B", "Differential Evolution", "Genetic Algorithm"]
-        )
-        
-        if st.button("🚀 Run All Models & Compare", type="primary"):
-            with st.spinner("Calculating and plotting all events..."):
+        if st.button("🚀 Run All Models & Calculate Geometric Mean", type="primary"):
+            with st.spinner("Calculating parameters for all events..."):
                 results_list = []
                 all_event_plots = [] 
 
@@ -319,8 +324,13 @@ def main():
                             n_mom = (m1_u ** 2) / var_u
                             k_mom = m1_u / n_mom
                             Q_mom = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_mom, k_mom, len(Q_obs))
-                            _, nse_mom = calculate_goodness_of_fit(Q_obs, Q_mom)
-                            event_results.update({'Moments_n': n_mom, 'Moments_k': k_mom, 'Moments_NSE': nse_mom})
+                            rmse_mom, nse_mom = calculate_goodness_of_fit(Q_obs, Q_mom)
+                            event_results.update({
+                                'Moments_n': n_mom, 
+                                'Moments_k': k_mom, 
+                                'Moments_RMSE': rmse_mom,
+                                'Moments_NSE': nse_mom
+                            })
                             model_outputs['Moments'] = {'q': Q_mom, 'n': n_mom, 'k': k_mom}
 
                     bounds = [(0.01, 20), (0.01, 50)]
@@ -330,41 +340,210 @@ def main():
                     res_lb = minimize(objective_rmse, initial_guess, args=(Q_obs, rainfall_excess, area_ha, dt_hr), method='L-BFGS-B', bounds=bounds)
                     n_lb, k_lb = res_lb.x
                     Q_lb = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_lb, k_lb, len(Q_obs))
-                    _, nse_lb = calculate_goodness_of_fit(Q_obs, Q_lb)
-                    event_results.update({'LBFGSB_n': n_lb, 'LBFGSB_k': k_lb, 'LBFGSB_NSE': nse_lb})
+                    rmse_lb, nse_lb = calculate_goodness_of_fit(Q_obs, Q_lb)
+                    event_results.update({
+                        'LBFGSB_n': n_lb, 
+                        'LBFGSB_k': k_lb, 
+                        'LBFGSB_RMSE': rmse_lb,
+                        'LBFGSB_NSE': nse_lb
+                    })
                     model_outputs['L-BFGS-B'] = {'q': Q_lb, 'n': n_lb, 'k': k_lb}
 
                     # 3. Differential Evolution
                     res_de = differential_evolution(objective_rmse, bounds, args=(Q_obs, rainfall_excess, area_ha, dt_hr), seed=42)
                     n_de, k_de = res_de.x
                     Q_de = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_de, k_de, len(Q_obs))
-                    _, nse_de = calculate_goodness_of_fit(Q_obs, Q_de)
-                    event_results.update({'DE_n': n_de, 'DE_k': k_de, 'DE_NSE': nse_de})
+                    rmse_de, nse_de = calculate_goodness_of_fit(Q_obs, Q_de)
+                    event_results.update({
+                        'DE_n': n_de, 
+                        'DE_k': k_de,
+                        'DE_RMSE': rmse_de,
+                        'DE_NSE': nse_de
+                    })
                     model_outputs['Diff. Evolution'] = {'q': Q_de, 'n': n_de, 'k': k_de}
 
                     # 4. Genetic Algorithm
                     res_ga = dual_annealing(objective_rmse, bounds, args=(Q_obs, rainfall_excess, area_ha, dt_hr), seed=42)
                     n_ga, k_ga = res_ga.x
                     Q_ga = calculate_nash_unit_hydrograph(rainfall_excess, area_ha, dt_hr, n_ga, k_ga, len(Q_obs))
-                    _, nse_ga = calculate_goodness_of_fit(Q_obs, Q_ga)
-                    event_results.update({'GA_n': n_ga, 'GA_k': k_ga, 'GA_NSE': nse_ga})
+                    rmse_ga, nse_ga = calculate_goodness_of_fit(Q_obs, Q_ga)
+                    event_results.update({
+                        'GA_n': n_ga, 
+                        'GA_k': k_ga,
+                        'GA_RMSE': rmse_ga,
+                        'GA_NSE': nse_ga
+                    })
                     model_outputs['Gen. Algorithm'] = {'q': Q_ga, 'n': n_ga, 'k': k_ga}
 
                     results_list.append(event_results)
-                    all_event_plots.append({'id': event_id, 'time': time_axis, 'obs': Q_obs, 'rain': rainfall_excess, 'models': model_outputs, 'dt': dt_hr})
+                    all_event_plots.append({
+                        'id': event_id, 
+                        'time': time_axis, 
+                        'obs': Q_obs, 
+                        'rain': rainfall_excess, 
+                        'models': model_outputs, 
+                        'dt': dt_hr
+                    })
 
+                results_df = pd.DataFrame(results_list)
+                
                 st.markdown("### 📋 Comparative Parameter Table")
-                st.dataframe(pd.DataFrame(results_list), use_container_width=True)
+                st.dataframe(results_df, use_container_width=True)
+
+                # ==================== GEOMETRIC MEAN CALCULATION ====================
+                st.markdown("---")
+                st.markdown('<div class="sub-header">🎯 Leave-One-Out Geometric Mean Parameters</div>', unsafe_allow_html=True)
+                st.info("These optimized parameters exclude each event when calculating its geometric mean, providing robust cross-validated values for prediction.")
+                
+                gm_results = pd.DataFrame({
+                    'Event_ID': results_df['Event_ID'],
+                    'GM_Moments_n': leave_one_out_geometric_mean(results_df['Moments_n']),
+                    'GM_Moments_k': leave_one_out_geometric_mean(results_df['Moments_k']),
+                    'GM_LBFGSB_n': leave_one_out_geometric_mean(results_df['LBFGSB_n']),
+                    'GM_LBFGSB_k': leave_one_out_geometric_mean(results_df['LBFGSB_k']),
+                    'GM_DE_n': leave_one_out_geometric_mean(results_df['DE_n']),
+                    'GM_DE_k': leave_one_out_geometric_mean(results_df['DE_k']),
+                    'GM_GA_n': leave_one_out_geometric_mean(results_df['GA_n']),
+                    'GM_GA_k': leave_one_out_geometric_mean(results_df['GA_k'])
+                })
+                
+                gm_results = gm_results.round(3)
+                st.dataframe(gm_results, use_container_width=True)
+                
+                # Overall Geometric Mean (for all events combined)
+                st.markdown("---")
+                st.markdown("### 🌟 Overall Recommended Parameters (Use for Prediction)")
+                
+                # Calculate individual method GMs
+                overall_n_mom = np.exp(np.mean(np.log(results_df['Moments_n'])))
+                overall_k_mom = np.exp(np.mean(np.log(results_df['Moments_k'])))
+                
+                overall_n_lb = np.exp(np.mean(np.log(results_df['LBFGSB_n'])))
+                overall_k_lb = np.exp(np.mean(np.log(results_df['LBFGSB_k'])))
+                
+                overall_n_de = np.exp(np.mean(np.log(results_df['DE_n'])))
+                overall_k_de = np.exp(np.mean(np.log(results_df['DE_k'])))
+                
+                overall_n_ga = np.exp(np.mean(np.log(results_df['GA_n'])))
+                overall_k_ga = np.exp(np.mean(np.log(results_df['GA_k'])))
+                
+                # Calculate Combined Geometric Mean across all methods
+                all_n_values = np.concatenate([
+                    results_df['Moments_n'].values,
+                    results_df['LBFGSB_n'].values,
+                    results_df['DE_n'].values,
+                    results_df['GA_n'].values
+                ])
+                all_k_values = np.concatenate([
+                    results_df['Moments_k'].values,
+                    results_df['LBFGSB_k'].values,
+                    results_df['DE_k'].values,
+                    results_df['GA_k'].values
+                ])
+                
+                combined_n = np.exp(np.mean(np.log(all_n_values)))
+                combined_k = np.exp(np.mean(np.log(all_k_values)))
+                
+                # Store in session state for use in prediction mode
+                st.session_state['gm_params'] = {
+                    'Moments_n': overall_n_mom,
+                    'Moments_k': overall_k_mom,
+                    'LBFGSB_n': overall_n_lb,
+                    'LBFGSB_k': overall_k_lb,
+                    'DE_n': overall_n_de,
+                    'DE_k': overall_k_de,
+                    'GA_n': overall_n_ga,
+                    'GA_k': overall_k_ga,
+                    'Combined_n': combined_n,
+                    'Combined_k': combined_k
+                }
+                
+                # Create beautiful summary table
+                summary_params_df = pd.DataFrame({
+                    'Optimization Method': [
+                        'Moments Method',
+                        'L-BFGS-B',
+                        'Differential Evolution',
+                        'Genetic Algorithm',
+                        '⭐ COMBINED (Recommended)'
+                    ],
+                    'Nash n': [
+                        f"{overall_n_mom:.4f}",
+                        f"{overall_n_lb:.4f}",
+                        f"{overall_n_de:.4f}",
+                        f"{overall_n_ga:.4f}",
+                        f"{combined_n:.4f}"
+                    ],
+                    'Nash k (hours)': [
+                        f"{overall_k_mom:.4f}",
+                        f"{overall_k_lb:.4f}",
+                        f"{overall_k_de:.4f}",
+                        f"{overall_k_ga:.4f}",
+                        f"{combined_k:.4f}"
+                    ],
+                    'Description': [
+                        'Statistical moment matching',
+                        'Gradient-based optimization',
+                        'Evolutionary global search',
+                        'Simulated annealing approach',
+                        'Geometric mean of all methods'
+                    ]
+                })
+                
+                st.dataframe(
+                    summary_params_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Optimization Method": st.column_config.TextColumn(
+                            "Optimization Method",
+                            width="medium",
+                        ),
+                        "Nash n": st.column_config.TextColumn(
+                            "Nash n",
+                            width="small",
+                        ),
+                        "Nash k (hours)": st.column_config.TextColumn(
+                            "Nash k (hours)",
+                            width="small",
+                        ),
+                        "Description": st.column_config.TextColumn(
+                            "Description",
+                            width="large",
+                        )
+                    }
+                )
+                
+                st.info(f"💡 **Recommended for Prediction:** Use the ⭐ COMBINED parameters (n={combined_n:.4f}, k={combined_k:.4f}) for most robust results across all optimization methods.")
+                
+                # Download buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    csv1 = results_df.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download Event Parameters",
+                        data=csv1,
+                        file_name="event_parameters.csv",
+                        mime="text/csv"
+                    )
+                
+                with col2:
+                    csv2 = gm_results.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download Geometric Mean Parameters",
+                        data=csv2,
+                        file_name="geometric_mean_parameters.csv",
+                        mime="text/csv"
+                    )
 
                 st.markdown("---")
                 st.markdown("### 📊 Overlap-Aware Comparison Hydrographs")
 
                 for plot_data in all_event_plots:
-                    with st.expander(f"Event {plot_data['id']} Comparison", expanded=True):
+                    with st.expander(f"Event {plot_data['id']} Comparison", expanded=False):
                         fig, ax1 = plt.subplots(figsize=(12, 5))
                         ax1.plot(plot_data['time'], plot_data['obs'], 'k-', linewidth=3, label='Observed', zorder=2)
                         
-                        # Configuration to handle overlaps: Different widths and dash styles
                         styles = {
                             'Moments': {'c': '#e41a1c', 'lw': 5.0, 'ls': '-', 'alpha': 0.4},
                             'L-BFGS-B': {'c': '#377eb8', 'lw': 3.5, 'ls': '--', 'alpha': 0.7},
@@ -393,14 +572,13 @@ def main():
                         plt.close()
     
     # ==================== MODE 3: REPRESENTATIVE UH ====================
-    else:  # Representative Unit Hydrograph
+    elif analysis_mode == "📈 Representative Unit Hydrograph":
         st.markdown('<div class="sub-header">Representative Unit Hydrograph</div>', unsafe_allow_html=True)
         
         smooth_option = st.checkbox("Apply smoothing to Representative UH", value=True)
         
         if st.button("🚀 Generate Representative UH", type="primary"):
             with st.spinner("Computing representative unit hydrograph..."):
-                # Process events and derive UHs
                 uh_list = []
                 max_len = 0
                 
@@ -412,7 +590,6 @@ def main():
                     
                     dt_hr = time_steps[1] - time_steps[0] if len(time_steps) > 1 else dt_hours
                     
-                    # Derive UH
                     A_m2 = area_ha * 1e4
                     dt_s = dt_hr * 3600.0
                     runoff_vol_per_step = Q_obs * dt_s
@@ -428,19 +605,15 @@ def main():
                     if len(UH_event) > max_len:
                         max_len = len(UH_event)
                 
-                # Pad UHs to same length
                 uh_matrix = np.zeros((len(unique_events), max_len))
                 for i, uh in enumerate(uh_list):
                     uh_matrix[i, :len(uh)] = uh
                 
-                # Compute mean representative UH
                 rep_uh = np.nanmean(uh_matrix, axis=0)
                 
-                # Normalize
                 if rep_uh.sum() > 0:
                     rep_uh = rep_uh / rep_uh.sum()
                 
-                # Apply smoothing
                 if smooth_option and max_len >= 5:
                     win = min(5, max_len if max_len % 2 == 1 else max_len - 1)
                     if win >= 3 and win % 2 == 1:
@@ -449,7 +622,6 @@ def main():
                         except:
                             pass
                 
-                # Calculate characteristics
                 t_rep = np.arange(len(rep_uh)) * dt_hours
                 peak_idx = np.argmax(rep_uh)
                 Tp = t_rep[peak_idx]
@@ -459,7 +631,6 @@ def main():
                 significant_indices = np.where(rep_uh > threshold)[0]
                 Tb = t_rep[significant_indices[-1]] if len(significant_indices) > 0 else t_rep[-1]
                 
-                # Display characteristics
                 st.markdown("### 📊 Representative UH Characteristics")
                 
                 col1, col2, col3 = st.columns(3)
@@ -470,7 +641,6 @@ def main():
                 with col3:
                     st.metric("Base Time (Tb)", f"{Tb:.2f} hr")
                 
-                # Plot Representative UH
                 fig, ax = plt.subplots(figsize=(14, 7))
                 
                 ax.plot(t_rep, rep_uh, 'b-', linewidth=3, label='Representative UH',
@@ -492,7 +662,6 @@ def main():
                 st.pyplot(fig)
                 plt.close()
                 
-                # Validation with events
                 st.markdown("### 🎯 Representative UH Validation")
                 
                 validation_results = []
@@ -505,7 +674,6 @@ def main():
                     
                     dt_hr = time_steps[1] - time_steps[0] if len(time_steps) > 1 else dt_hours
                     
-                    # Simulate using rep UH
                     rep_uh_trim = rep_uh[:len(rainfall_excess)]
                     conv_mm = np.convolve(rainfall_excess, rep_uh_trim, mode='full')[:len(Q_obs)]
                     A_m2 = area_ha * 1e4
@@ -531,7 +699,6 @@ def main():
                 with col2:
                     st.metric("Average RMSE", f"{val_df['RMSE'].mean():.3f}")
                 
-                # Download button for Rep UH
                 rep_uh_df = pd.DataFrame({
                     'Time_h': t_rep,
                     'UH_Ordinate_mm_per_mm': rep_uh
@@ -545,18 +712,69 @@ def main():
                     mime="text/csv"
                 )
     
-    # ==================== MODE 4: RUNOFF PREDICTION (NEW) ====================
-    if analysis_mode == "🔮 Runoff Prediction (Rainfall Only)":
+    # ==================== MODE 4: RUNOFF PREDICTION ====================
+    else:
         st.markdown('<div class="sub-header">Predict Runoff from Rainfall Data</div>', unsafe_allow_html=True)
         st.info("This mode uses your calibrated parameters to forecast runoff. No observed discharge (Q_obs) is required.")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            n_pred = st.number_input("Calibrated Nash n", value=1.735, min_value=0.1, step=0.01)
-        with col2:
-            k_pred = st.number_input("Calibrated Nash k (hours)", value=1.031, min_value=0.1, step=0.01)
+        # Check if geometric mean parameters are available
+        if 'gm_params' in st.session_state:
+            st.success("✅ Geometric Mean parameters loaded from Parameter Estimation!")
+            gm = st.session_state['gm_params']
+            
+            st.markdown("### 📊 Available Optimized Parameters")
+            param_df = pd.DataFrame({
+                'Method': ['Moments', 'L-BFGS-B', 'Differential Evolution', 'Genetic Algorithm', '⭐ COMBINED (All Methods)'],
+                'n': [gm['Moments_n'], gm['LBFGSB_n'], gm['DE_n'], gm['GA_n'], gm['Combined_n']],
+                'k (hrs)': [gm['Moments_k'], gm['LBFGSB_k'], gm['DE_k'], gm['GA_k'], gm['Combined_k']]
+            })
+            st.dataframe(param_df, use_container_width=True)
+        else:
+            st.warning("⚠️ No geometric mean parameters found. Run 'Parameter Estimation' mode first, or enter parameters manually below.")
+        
+        st.markdown("---")
+        st.markdown("### 🔧 Select Prediction Method")
+        
+        # Method selection
+        if 'gm_params' in st.session_state:
+            method_choice = st.radio(
+                "Choose parameter set:",
+                ["⭐ Combined (Recommended)", "Moments", "L-BFGS-B", "Differential Evolution", "Genetic Algorithm", "Manual Entry"],
+                horizontal=True
+            )
+            
+            if method_choice == "⭐ Combined (Recommended)":
+                n_pred = gm['Combined_n']
+                k_pred = gm['Combined_k']
+                st.info(f"Using Combined GM: n={n_pred:.4f}, k={k_pred:.4f}")
+            elif method_choice == "Moments":
+                n_pred = gm['Moments_n']
+                k_pred = gm['Moments_k']
+            elif method_choice == "L-BFGS-B":
+                n_pred = gm['LBFGSB_n']
+                k_pred = gm['LBFGSB_k']
+            elif method_choice == "Differential Evolution":
+                n_pred = gm['DE_n']
+                k_pred = gm['DE_k']
+            elif method_choice == "Genetic Algorithm":
+                n_pred = gm['GA_n']
+                k_pred = gm['GA_k']
+            else:  # Manual Entry
+                col1, col2 = st.columns(2)
+                with col1:
+                    n_pred = st.number_input("Calibrated Nash n", value=1.735, min_value=0.1, step=0.01)
+                with col2:
+                    k_pred = st.number_input("Calibrated Nash k (hours)", value=1.031, min_value=0.1, step=0.01)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                n_pred = st.number_input("Calibrated Nash n", value=1.735, min_value=0.1, step=0.01)
+            with col2:
+                k_pred = st.number_input("Calibrated Nash k (hours)", value=1.031, min_value=0.1, step=0.01)
 
         if st.button("🔮 Generate Prediction", type="primary"):
+            st.markdown(f"**Using Parameters: n = {n_pred:.4f}, k = {k_pred:.4f}**")
+            
             prediction_results = []
             
             for event_id in unique_events:
@@ -566,15 +784,11 @@ def main():
                 dt_hr = time_steps[1] - time_steps[0] if len(time_steps) > 1 else dt_hours
                 time_axis = time_steps - time_steps[0]
 
-                # Generate Runoff
-                # We extend output length slightly to ensure we see the recession curve
                 output_len = len(rain) + int(10/dt_hr) 
                 Q_pred = calculate_nash_unit_hydrograph(rain, area_ha, dt_hr, n_pred, k_pred, output_len)
                 
-                # Create a time axis for the longer prediction
                 time_axis_pred = np.arange(output_len) * dt_hr
 
-                # Store result
                 res_df = pd.DataFrame({
                     'Time_hr': time_axis_pred,
                     'Rainfall_mm': np.pad(rain, (0, output_len - len(rain)), 'constant'),
@@ -582,28 +796,40 @@ def main():
                 })
                 
                 with st.expander(f"Prediction for Event {event_id}", expanded=True):
-                    fig, ax1 = plt.subplots(figsize=(12, 5))
-                    ax1.plot(time_axis_pred, Q_pred, 'r-', linewidth=2, label=f'Predicted (n={n_pred}, k={k_pred})')
-                    ax1.set_xlabel('Time (hr)')
-                    ax1.set_ylabel('Predicted Discharge (m³/s)', color='red')
-                    ax1.tick_params(axis='y', labelcolor='red')
-                    ax1.grid(True, alpha=0.2)
-
-                    ax2 = ax1.twinx()
-                    ax2.bar(time_axis_pred, res_df['Rainfall_mm'], width=dt_hr*0.7, alpha=0.2, color='blue', label='Rainfall Input')
-                    ax2.set_ylabel('Rainfall (mm)', color='blue')
-                    ax2.invert_yaxis()
+                    col1, col2 = st.columns([2, 1])
                     
-                    st.pyplot(fig)
-                    plt.close()
+                    with col1:
+                        fig, ax1 = plt.subplots(figsize=(12, 5))
+                        ax1.plot(time_axis_pred, Q_pred, 'r-', linewidth=2.5, label=f'Predicted (n={n_pred:.3f}, k={k_pred:.3f})')
+                        ax1.set_xlabel('Time (hr)', fontsize=12)
+                        ax1.set_ylabel('Predicted Discharge (m³/s)', color='red', fontsize=12)
+                        ax1.tick_params(axis='y', labelcolor='red')
+                        ax1.grid(True, alpha=0.2)
+                        ax1.legend(loc='upper left')
 
-                    # Individual download for this event
+                        ax2 = ax1.twinx()
+                        ax2.bar(time_axis_pred, res_df['Rainfall_mm'], width=dt_hr*0.7, alpha=0.2, color='blue', label='Rainfall Input')
+                        ax2.set_ylabel('Rainfall (mm)', color='blue', fontsize=12)
+                        ax2.invert_yaxis()
+                        ax2.legend(loc='upper right')
+                        
+                        plt.title(f"Event {event_id} - Runoff Prediction", fontsize=14, fontweight='bold')
+                        st.pyplot(fig)
+                        plt.close()
+                    
+                    with col2:
+                        st.markdown("**Prediction Summary**")
+                        st.metric("Peak Flow", f"{np.max(Q_pred):.3f} m³/s")
+                        st.metric("Total Rainfall", f"{np.sum(rain):.2f} mm")
+                        st.metric("Time to Peak", f"{time_axis_pred[np.argmax(Q_pred)]:.2f} hr")
+
                     csv = res_df.to_csv(index=False)
                     st.download_button(
                         label=f"📥 Download Event {event_id} Prediction",
                         data=csv,
                         file_name=f"prediction_event_{event_id}.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        key=f"download_{event_id}"
                     )
 
 if __name__ == "__main__":
